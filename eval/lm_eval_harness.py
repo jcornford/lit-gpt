@@ -147,6 +147,7 @@ def run_eval_harness(
     limit: Optional[int] = None,
     bootstrap_iters: int = 100000,
     no_cache: bool = True,
+    batch_size: int = 1,
 ):
     if precision is None:
         precision = get_default_supported_precision(training=False)
@@ -183,7 +184,7 @@ def run_eval_harness(
 
     load_checkpoint(fabric, model, checkpoint_path)
 
-    eval_harness = EvalHarnessBase(fabric, model, tokenizer, 1)
+    eval_harness = EvalHarnessBase(fabric, model, tokenizer, batch_size)
 
     results = eval_harness.run_eval(eval_tasks, num_fewshot, limit, bootstrap_iters, no_cache)
     if save_filepath is None:

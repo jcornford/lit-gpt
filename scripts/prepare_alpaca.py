@@ -43,7 +43,9 @@ def prepare(
     print("Loading data file...")
     download_if_missing(data_file_path, data_file_url)
     with open(data_file_path, "r", encoding="utf-8") as file:
-        data = json.load(file)
+        breakpoint()
+        # data = json.load(file)
+        data = json.loads(file.read())
 
     print("Loading tokenizer...")
     tokenizer = Tokenizer(checkpoint_dir)
