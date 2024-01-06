@@ -28,35 +28,67 @@ from lit_gpt.utils import (
     num_parameters,
 )
 from scripts.prepare_alpaca import generate_prompt
+import argparse
+from dataclasses import dataclass
+@dataclass
+class Hyperparameters:
+    eval_interval = 100
+    save_interval = 100
+    eval_iters = 100
+    eval_max_new_tokens = 100
+    log_interval = 1
+    devices = 1
+    
+    learning_rate: float = 3e-4
+    batch_size: int = 128
+    micro_batch_size: int = 4
+    gradient_accumulation_iters: int = batch_size // micro_batch_size
+    max_seq_length: int = None  # assign value to truncate
+    max_iters: int = 50000  # train dataset size
+    weight_decay: float = 0.01
+    lora_r: int = 8
+    lora_alpha: int = 16
+    lora_dropout: float = 0.05
+    lora_query: bool = True
+    lora_key: bool = False
+    lora_value: bool = True
+    lora_projection: bool = False
+    lora_mlp: bool = False
+    lora_head: bool = False
+    warmup_steps: int = 100
 
-eval_interval = 100
-save_interval = 100
-eval_iters = 100
-eval_max_new_tokens = 100
-log_interval = 1
-devices = 1
+# Create the parser
+parser = argparse.ArgumentParser(description='LoRa Hyperparameters')
 
-# Hyperparameters
-learning_rate = 3e-4
-batch_size = 128
-micro_batch_size = 4
-gradient_accumulation_iters = batch_size // micro_batch_size
+# Add the arguments
+for field in Hyperparameters.__annotations__.keys():
+    parser.add_argument(f'--{field}', type=type(getattr(Hyperparameters, field)), default=getattr(Hyperparameters, field))
+
+# Parse the arguments
+args = parser.parse_args()
+
+# Hyperparameters as in original script now from argparse 
+learning_rate = args.learning_rate
+batch_size = args.batch_size
+micro_batch_size = args.micro_batch_size
+gradient_accumulation_iters = args.gradient_accumulation_iters
 assert gradient_accumulation_iters > 0
-max_seq_length = None  # assign value to truncate
-max_iters = 50000  # train dataset size
-weight_decay = 0.01
-lora_r = 8
-lora_alpha = 16
-lora_dropout = 0.05
-lora_query = True
-lora_key = False
-lora_value = True
-lora_projection = False
-lora_mlp = False
-lora_head = False
-warmup_steps = 100
+max_seq_length = args.max_seq_length
+max_iters = args.max_iters
+weight_decay = args.weight_decay
+lora_r = args.lora_r
+lora_alpha = args.lora_alpha
+lora_dropout = args.lora_dropout
+lora_query = args.lora_query
+lora_key = args.lora_key
+lora_value = args.lora_value
+lora_projection = args.lora_projection
+lora_mlp = args.lora_mlp
+lora_head = args.lora_head
+warmup_steps = args.warmup_steps
 
 hparams = {k: v for k, v in locals().items() if isinstance(v, (int, float, str)) and not k.startswith("_")}
+print(hparams)
 
 def setup(
     data_dir: Path = Path("data/alpaca"),
