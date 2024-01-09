@@ -45,7 +45,6 @@ def prepare(
     print("Loading data file...")
     download_if_missing(data_file_path, data_file_url)
     with open(data_file_path, "r", encoding="utf-8") as file:
-        breakpoint()
         # data = json.load(file)
         data = json.loads(file.read())
 

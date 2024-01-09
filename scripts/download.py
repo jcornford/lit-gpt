@@ -52,10 +52,11 @@ def download_from_hub(
         raise ValueError("`--from_safetensors=True` won't have an effect with `--tokenizer_only=True`")
 
     directory = checkpoint_dir / repo_id
+    print(f"Downloading {repo_id} to {directory}")
     snapshot_download(
         repo_id,
         local_dir=directory,
-        local_dir_use_symlinks=False,
+        local_dir_use_symlinks="auto",
         resume_download=True,
         allow_patterns=download_files,
         token=access_token,

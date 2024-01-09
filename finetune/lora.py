@@ -32,12 +32,12 @@ import argparse
 from dataclasses import dataclass
 @dataclass
 class Hyperparameters:
-    eval_interval = 100
-    save_interval = 100
-    eval_iters = 100
-    eval_max_new_tokens = 100
-    log_interval = 1
-    devices = 1
+    eval_interval: int = 100
+    save_interval:int = 100
+    eval_iters:int = 100
+    eval_max_new_tokens:int = 100
+    log_interval:int = 1
+    devices:int = 1
     
     learning_rate: float = 3e-4
     batch_size: int = 128
@@ -46,8 +46,8 @@ class Hyperparameters:
     max_seq_length: int = None  # assign value to truncate
     max_iters: int = 50000  # train dataset size
     weight_decay: float = 0.01
-    lora_r: int = 8
-    lora_alpha: int = 16
+    lora_r: int = 16 #8
+    lora_alpha: int = 32 #16
     lora_dropout: float = 0.05
     lora_query: bool = True
     lora_key: bool = False
@@ -57,6 +57,13 @@ class Hyperparameters:
     lora_head: bool = False
     warmup_steps: int = 100
 
+    # from setup defualts
+    data_dir: Path = Path("data/alpaca")
+    checkpoint_dir: Path = Path("checkpoints/stabilityai/stablelm-base-alpha-3b")
+    out_dir: Path = Path("out/lora/alpaca")
+    precision: Optional[str] = ""
+    quantize: Optional[Literal["bnb.nf4", "bnb.nf4-dq", "bnb.fp4", "bnb.fp4-dq", "bnb.int8-training"]] = None
+
 # Create the parser
 parser = argparse.ArgumentParser(description='LoRa Hyperparameters')
 
@@ -64,10 +71,19 @@ parser = argparse.ArgumentParser(description='LoRa Hyperparameters')
 for field in Hyperparameters.__annotations__.keys():
     parser.add_argument(f'--{field}', type=type(getattr(Hyperparameters, field)), default=getattr(Hyperparameters, field))
 
+
 # Parse the arguments
 args = parser.parse_args()
 
 # Hyperparameters as in original script now from argparse 
+
+eval_interval = args.eval_interval
+save_interval = args.save_interval
+eval_iters = args.eval_iters
+eval_max_new_tokens = args.eval_max_new_tokens
+log_interval = args.log_interval
+devices = args.devices
+
 learning_rate = args.learning_rate
 batch_size = args.batch_size
 micro_batch_size = args.micro_batch_size
@@ -87,7 +103,15 @@ lora_mlp = args.lora_mlp
 lora_head = args.lora_head
 warmup_steps = args.warmup_steps
 
-hparams = {k: v for k, v in locals().items() if isinstance(v, (int, float, str)) and not k.startswith("_")}
+data_dir = args.data_dir
+checkpoint_dir = args.checkpoint_dir
+out_dir =  args.out_dir
+precision = args.precision
+quantize = args.quantize
+
+# hparams = {k: v for k, v in locals().items() if isinstance(v, (int, float, str, Path)) and not k.startswith("_")}
+hparams = {k: v for k, v in locals().items() if k in Hyperparameters.__annotations__.keys()}
+
 print(hparams)
 
 def setup(
@@ -348,6 +372,14 @@ def save_lora_checkpoint(fabric: L.Fabric, model: torch.nn.Module, file_path: Pa
 if __name__ == "__main__":
     torch.set_float32_matmul_precision("high")
 
-    from jsonargparse import CLI
+    # from jsonargparse import CLI
 
-    CLI(setup)
+    # CLI(setup)
+
+    setup(
+        data_dir=hparams["data_dir"],
+        checkpoint_dir=hparams["checkpoint_dir"],
+        out_dir=hparams["out_dir"],
+        precision=hparams["precision"],
+        quantize=hparams["quantize"],
+    )
