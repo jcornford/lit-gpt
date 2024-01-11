@@ -46,8 +46,10 @@ class Hyperparameters:
     max_seq_length: int = None  # assign value to truncate
     max_iters: int = 50000  # train dataset size
     weight_decay: float = 0.01
-    lora_r: int = 16 #8
-    lora_alpha: int = 32 #16
+    lora_A_lr_correction: float = 1.0
+    lora_B_lr_correction: float = 1.0
+    lora_r: int = 8
+    lora_alpha: int = 16
     lora_dropout: float = 0.05
     lora_query: bool = True
     lora_key: bool = False
@@ -92,6 +94,8 @@ assert gradient_accumulation_iters > 0
 max_seq_length = args.max_seq_length
 max_iters = args.max_iters
 weight_decay = args.weight_decay
+lora_A_lr_correction = args.lora_A_lr_correction
+lora_B_lr_correction = args.lora_B_lr_correction
 lora_r = args.lora_r
 lora_alpha = args.lora_alpha
 lora_dropout = args.lora_dropout
@@ -189,13 +193,21 @@ def main(fabric: L.Fabric, data_dir: Path, checkpoint_dir: Path, out_dir: Path) 
 
     model = fabric.setup_module(model)
 
-    trainable_params = [p for p in model.parameters() if p.requires_grad]
+    # trainable_params = [p for p in model.parameters() if p.requires_grad]
+    all_trainable_params = {k: p for k,p in model.named_parameters() if p.requires_grad}
+    trainable_params = [
+        {"params": [p for k,p in all_trainable_params.items() if "lora_A" in k], "lr": learning_rate * lora_A_lr_correction},
+        {"params": [p for k,p in all_trainable_params.items() if "lora_B" in k], "lr": learning_rate * lora_B_lr_correction},
+        {"params": [p for k,p in all_trainable_params.items() if "lora_A" not in k and "lora_B" not in k], "lr": learning_rate}
+    ]
+    #breakpoint()
     if isinstance(fabric.strategy.precision, BitsandbytesPrecision):
         import bitsandbytes as bnb
-
+        fabric.print("WARNING: Grouped params not tested with PagedAdamW yet (for lr correction)!!!!")
         optimizer = bnb.optim.PagedAdamW(trainable_params, lr=learning_rate, weight_decay=weight_decay)
     else:
         optimizer = torch.optim.AdamW(trainable_params, lr=learning_rate, weight_decay=weight_decay)
+    
     optimizer = fabric.setup_optimizers(optimizer)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max_iters // batch_size)
 

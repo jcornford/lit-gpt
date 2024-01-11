@@ -173,6 +173,7 @@ class LoRALinear(LoRALayer):
         pretrained = self.linear(x)
         if self.r == 0 or self.merged:
             return pretrained
+        # B@A@x if batch was not first dim, so we transpose x@A^T@B^T
         lora = (self.lora_dropout(x) @ self.lora_A.transpose(0, 1) @ self.lora_B.transpose(0, 1)) * self.scaling
         return pretrained + lora
 
@@ -503,9 +504,10 @@ class GPT(BaseModel):
         self.max_seq_length = self.config.block_size
         self.mask_cache: Optional[torch.Tensor] = None
 
-    def forward(
-        self, idx: torch.Tensor, input_pos: Optional[torch.Tensor] = None, lm_head_chunk_size: int = 0
-    ) -> Union[torch.Tensor, List[torch.Tensor]]:
+    def forward(self, idx: torch.Tensor, 
+                input_pos: Optional[torch.Tensor] = None, 
+                lm_head_chunk_size: int = 0
+) -> Union[torch.Tensor, List[torch.Tensor]]:
         T = idx.size(1)
         if self.max_seq_length < T:
             raise ValueError(f"Cannot forward sequence of length {T}, max seq length is only {self.max_seq_length}.")
@@ -521,11 +523,11 @@ class GPT(BaseModel):
             sin = self.sin[:T]
             mask = None
 
-        x = self.transformer.wte(idx)  # token embeddings of shape (b, t, n_embd)
+        x = self.transformer.wte(idx)  # word token embeddings of shape (b, t, n_embd)
         for block in self.transformer.h:
             x = block(x, cos, sin, mask, input_pos)
         x = self.transformer.ln_f(x)
-        if lm_head_chunk_size > 0:
+        if lm_head_chunk_size > 0: # lm is language model
             # chunk the lm head logits to reduce the peak memory used by autograd
             return [self.lm_head(x_i) for x_i in x.split(lm_head_chunk_size, dim=1)]
         return self.lm_head(x)  # (B, T, vocab_size)
