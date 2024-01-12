@@ -196,10 +196,15 @@ def main(fabric: L.Fabric, data_dir: Path, checkpoint_dir: Path, out_dir: Path) 
     # trainable_params = [p for p in model.parameters() if p.requires_grad]
     all_trainable_params = {k: p for k,p in model.named_parameters() if p.requires_grad}
     trainable_params = [
-        {"params": [p for k,p in all_trainable_params.items() if "lora_A" in k], "lr": learning_rate * lora_A_lr_correction},
-        {"params": [p for k,p in all_trainable_params.items() if "lora_B" in k], "lr": learning_rate * lora_B_lr_correction},
-        {"params": [p for k,p in all_trainable_params.items() if "lora_A" not in k and "lora_B" not in k], "lr": learning_rate}
+        {"params": [p for k,p in all_trainable_params.items() if "lora_A" in k],
+         "init_lr": learning_rate * lora_A_lr_correction, "lr": learning_rate * lora_A_lr_correction, "name": "lora_A"},
+        {"params": [p for k,p in all_trainable_params.items() if "lora_B" in k],
+         "init_lr": learning_rate * lora_B_lr_correction, "lr": learning_rate * lora_B_lr_correction, "name": "lora_B"},
+        {"params": [p for k,p in all_trainable_params.items() if "lora_A" not in k and "lora_B" not in k], 
+         "init_lr": learning_rate, "lr": learning_rate,  "name": "not lora"}
     ]
+    for pg in trainable_params:
+        fabric.print(f"Lr: {pg['lr']}")
     #breakpoint()
     if isinstance(fabric.strategy.precision, BitsandbytesPrecision):
         import bitsandbytes as bnb
@@ -209,6 +214,10 @@ def main(fabric: L.Fabric, data_dir: Path, checkpoint_dir: Path, out_dir: Path) 
         optimizer = torch.optim.AdamW(trainable_params, lr=learning_rate, weight_decay=weight_decay)
     
     optimizer = fabric.setup_optimizers(optimizer)
+
+    for pg in optimizer.param_groups:
+        fabric.print(f"{pg['name']} Lr: {pg['lr']}")
+    print("-----------------")
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max_iters // batch_size)
 
     # strict=False because missing keys due to LoRA weights not contained in state dict
@@ -253,10 +262,11 @@ def train(
     total_t0 = time.perf_counter()
 
     for iter_num in range(1, max_iters + 1):
+        
         if step_count <= warmup_steps:
             # linear warmup
-            lr = learning_rate * step_count / warmup_steps
             for param_group in optimizer.param_groups:
+                lr = param_group["init_lr"] * step_count / warmup_steps
                 param_group["lr"] = lr
 
         iter_t0 = time.perf_counter()
@@ -272,6 +282,12 @@ def train(
             fabric.backward(loss / gradient_accumulation_iters)
 
         if not is_accumulating:
+            print(model.transformer.h[25].attn.attn.lora_B[:5,:4].grad)
+            print(model.transformer.h[25].attn.attn.lora_B[:5,:4])
+            print(model.transformer.h[25].attn.attn.lora_A[:5,:4].grad)
+            print(model.transformer.h[25].attn.attn.lora_A[:5,:4])
+            for param_group in optimizer.param_groups:
+                print(param_group["name"], param_group["lr"])
             optimizer.step()
             optimizer.zero_grad()
             if step_count > warmup_steps:
