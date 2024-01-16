@@ -15,6 +15,7 @@ from lit_gpt.utils import find_multiple
 
 @dataclass
 class Config:
+    equal_order_init: bool = False
     name: str = ""
     hf_config: dict = field(default_factory=dict)
     block_size: int = 4096
