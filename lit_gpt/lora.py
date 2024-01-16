@@ -62,7 +62,7 @@ from lit_gpt.utils import map_old_state_dict_weights
 
 
 class LoRALayer(nn.Module):
-    def __init__(self, r: int, lora_alpha: int, lora_dropout: float):
+    def __init__(self, r: int, lora_alpha: int, lora_dropout: float, equal_order_init: bool):
         """Store LoRA specific attributes in a class.
 
         Args:
@@ -72,6 +72,7 @@ class LoRALayer(nn.Module):
                 "This scaling helps to reduce the need to retune hyperparameters when we vary r"
                 https://arxiv.org/pdf/2106.09685.pdf (section 4.1)
             lora_dropout: dropout that is applied on the input in the LoRA branch (before multiplying by matrix A)
+            equal_order_init: if True, initialize LoRA matrices with the same order as each other.
         """
         super().__init__()
         assert r >= 0
@@ -84,7 +85,8 @@ class LoRALayer(nn.Module):
             self.lora_dropout = lambda x: x
         # Mark the weight as unmerged
         self.merged = False
-
+        # Equal order initialization
+        self.equal_order_init = equal_order_init
 
 class LoRALinear(LoRALayer):
     # LoRA implemented in a dense layer
@@ -97,6 +99,7 @@ class LoRALinear(LoRALayer):
         r: int = 0,
         lora_alpha: int = 1,
         lora_dropout: float = 0.0,
+        equal_order_init: bool = False,
         **kwargs: Any,
     ):
         """LoRA wrapper around linear class.
@@ -116,28 +119,43 @@ class LoRALinear(LoRALayer):
                 "This scaling helps to reduce the need to retune hyperparameters when we vary r"
                 https://arxiv.org/pdf/2106.09685.pdf (section 4.1)
             lora_dropout: dropout that is applied on the input in the LoRA branch (before multiplying by matrix A)
+            equal_order_init: if True, initialize LoRA matrices with the same order as each other.
         """
-        super().__init__(r=r, lora_alpha=lora_alpha, lora_dropout=lora_dropout)
+        super().__init__(r=r, lora_alpha=lora_alpha, 
+                         lora_dropout=lora_dropout,
+                         equal_order_init=equal_order_init)
         self.linear = torch.nn.Linear(in_features, out_features, **kwargs)
 
         # Actual trainable parameters
         if r > 0:
             self.lora_A = nn.Parameter(torch.zeros((r, in_features)))
             self.lora_B = nn.Parameter(torch.zeros((out_features, r)))
+            if self.equal_order_init:
+                self.lora_A_init = nn.Parameter(torch.zeros((r, in_features)), requires_grad=False)
+                self.lora_B_init = nn.Parameter(torch.zeros((r, in_features)), requires_grad=False)
             self.scaling = self.lora_alpha / self.r
             self.reset_parameters()
-
+    
     def reset_parameters(self) -> None:
         """Reset all the weights, even including pretrained ones."""
         if hasattr(self, "lora_A"):
             # initialize A the same way as the default for nn.Linear and B to zero
             # Wondering why 'a' is equal to math.sqrt(5)?: https://github.com/pytorch/pytorch/issues/15314
             nn.init.kaiming_uniform_(self.lora_A, a=math.sqrt(5))
-            nn.init.zeros_(self.lora_B)
-
+            if self.equal_order_init:
+                nn.init.kaiming_uniform_(self.lora_B, a=math.sqrt(5))
+                self.lora_A_init.data = self.lora_A.data.clone()
+                self.lora_B_init.data = self.lora_B.data.clone()
+            else:
+                nn.init.zeros_(self.lora_B)
+            # self.AB_init = (self.lora_B.weight.data @ self.lora_A.weight.data).detach().clone()
+        
     def get_lora_AB(self) -> torch.Tensor:
         """Return merged lora_A and lora_B matrices with the same shape as the pretrained weights."""
-        return (self.lora_B @ self.lora_A) * self.scaling
+        if self.equal_order_init:
+            return (self.lora_B @ self.lora_A - self.lora_B_init @ self.lora_A_init) * self.scaling
+        else:
+            return (self.lora_B @ self.lora_A) * self.scaling
 
     def merge(self) -> None:
         """Merges the LoRA weights into the full-rank weights (W = W + delta_W)."""
@@ -173,9 +191,14 @@ class LoRALinear(LoRALayer):
         pretrained = self.linear(x)
         if self.r == 0 or self.merged:
             return pretrained
-        # B@A@x if batch was not first dim, so we transpose x@A^T@B^T
-        lora = (self.lora_dropout(x) @ self.lora_A.transpose(0, 1) @ self.lora_B.transpose(0, 1)) * self.scaling
-        return pretrained + lora
+        if self.equal_order_init:
+            lora_mat = self.lora_A.transpose(0, 1) @ self.lora_B.transpose(0, 1)
+            lora_init = self.lora_A_init.transpose(0, 1) @ self.lora_B_init.transpose(0, 1)
+            lora = (self.lora_dropout(x) @ (lora_mat-lora_init)) * self.scaling
+        else:
+            # B@A@x if batch was not first dim, so we transpose x@A^T@B^T
+            lora = (self.lora_dropout(x) @ self.lora_A.transpose(0, 1) @ self.lora_B.transpose(0, 1)) * self.scaling
+        return pretrained + lora 
 
 
 class LoRAQKVLinear(LoRALinear):
@@ -192,6 +215,7 @@ class LoRAQKVLinear(LoRALinear):
         lora_alpha: int = 1,
         lora_dropout: float = 0.0,
         enable_lora: Union[bool, Tuple[bool, bool, bool]] = False,
+        equal_order_init: bool = False,
         **kwargs: Any,
     ):
         """LoRA wrapper around linear class that is used for calculation of q, k and v matrices.
@@ -217,7 +241,9 @@ class LoRAQKVLinear(LoRALinear):
                 don't want to apply LoRA we can set it as False. For example if we want to apply LoRA only to `query`
                 and `value` but keep `key` without weight updates we should pass `[True, False, True]`
         """
-        super(LoRALinear, self).__init__(r=r, lora_alpha=lora_alpha, lora_dropout=lora_dropout)
+        super(LoRALinear, self).__init__(r=r, lora_alpha=lora_alpha, 
+                                         lora_dropout=lora_dropout, 
+                                         equal_order_init=equal_order_init) 
         self.linear = torch.nn.Linear(in_features, out_features, **kwargs)
         self.n_head = n_head
         self.n_query_groups = n_query_groups
@@ -485,7 +511,6 @@ class GPT(BaseModel):
         nn.Module.__init__(self)
         assert config.padded_vocab_size is not None
         self.config = config
-
         self.lm_head = LoRALinear(
             config.n_embd,
             config.padded_vocab_size,
@@ -493,6 +518,7 @@ class GPT(BaseModel):
             r=(config.r if config.to_head else 0),
             lora_alpha=config.alpha,
             lora_dropout=config.dropout,
+            equal_order_init=config.equal_order_init,
         )
         self.transformer = nn.ModuleDict(
             dict(
@@ -579,6 +605,7 @@ class CausalSelfAttention(BaseCausalSelfAttention):
             # for MQA/GQA support
             n_head=config.n_head,
             n_query_groups=config.n_query_groups,
+            equal_order_init=config.equal_order_init,
         )
         # output projection
         self.proj = LoRALinear(
@@ -588,6 +615,7 @@ class CausalSelfAttention(BaseCausalSelfAttention):
             r=(config.r if config.to_projection else 0),
             lora_alpha=config.alpha,
             lora_dropout=config.dropout,
+            equal_order_init=config.equal_order_init,
         )
         # disabled by default
         self.kv_cache: Optional[KVCache] = None
