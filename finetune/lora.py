@@ -1,7 +1,9 @@
 # Copyright Lightning AI. Licensed under the Apache License 2.0, see LICENSE file.
 
 import os
+import json
 import sys
+import numpy as np
 import time
 from pathlib import Path
 from typing import Dict, List, Literal, Optional, Tuple
@@ -41,10 +43,11 @@ class Hyperparameters:
     
     learning_rate: float = 3e-4
     batch_size: int = 128
-    micro_batch_size: int = 4
+    micro_batch_size: int = 4 # gradients are accumulated over each micro batch, 32 * 4 = 128
     gradient_accumulation_iters: int = batch_size // micro_batch_size
     max_seq_length: int = None  # assign value to truncate
-    max_iters: int = 50000  # train dataset size
+    max_iters: int = 13000 #50000  # train dataset size is 52k, one iter is 1 micro batch, ie 4 samples. So 52k / 4 = 13k iters
+    # max_iters = ceil(52k/micro_batch_size) for one pass over dataset
     weight_decay: float = 0.01
     lora_A_lr_correction: float = 1.0
     lora_B_lr_correction: float = 1.0
@@ -261,6 +264,10 @@ def train(
     total_lengths = 0
     total_t0 = time.perf_counter()
 
+    results_dict = {"train_loss": {}, "val_loss": {}}  # for plotting
+    hparams_save_format = {k:v for k,v in hparams.items() if k not in ["data_dir", "checkpoint_dir", "out_dir"]}
+    json.dump(hparams_save_format, (out_dir / "hparams.json").open("w"))
+    fabric.print(f"Saving checkpoints to {str(out_dir)!r}")
     for iter_num in range(1, max_iters + 1):
         
         if step_count <= warmup_steps:
@@ -281,6 +288,10 @@ def train(
             loss = chunked_cross_entropy(logits, targets[..., 1:])
             fabric.backward(loss / gradient_accumulation_iters)
 
+        if step_count not in results_dict["train_loss"].keys():
+            results_dict["train_loss"][step_count] = []
+        results_dict["train_loss"][step_count].append(loss.item())
+
         if not is_accumulating:
             print(model.transformer.h[25].attn.attn.lora_B[:5,:4].grad)
             print(model.transformer.h[25].attn.attn.lora_B[:5,:4])
@@ -292,6 +303,7 @@ def train(
             optimizer.zero_grad()
             if step_count > warmup_steps:
                 scheduler.step()
+            results_dict["train_loss"][step_count] = np.mean(results_dict["train_loss"][step_count])
             step_count += 1
 
         total_lengths += input_ids.numel()
@@ -306,6 +318,7 @@ def train(
                 f"iter {iter_num} step {step_count}: loss {loss_item:.4f}, iter time:"
                 f" {(t1 - iter_t0) * 1000:.2f}ms{' (optimizer.step)' if not is_accumulating else ''}"
             )
+            # results_dict["train_loss"][str((iter_num, step_count))] = loss_item
 
         if not is_accumulating and step_count % eval_interval == 0:
             t0 = time.perf_counter()
@@ -313,9 +326,13 @@ def train(
             t1 = time.perf_counter() - t0
             fabric.print(f"step {iter_num}: val loss {val_loss.item():.4f}, val time: {t1 * 1000:.2f}ms")
             fabric.barrier()
+            results_dict["val_loss"][step_count] = val_loss.item()
+
         if not is_accumulating and step_count % save_interval == 0:
             checkpoint_path = out_dir / f"iter-{iter_num:06d}-step-{step_count:04d}-ckpt.pth"
             save_lora_checkpoint(fabric, model, checkpoint_path)
+            json.dump(results_dict, (out_dir / "loss_curves.json").open("w"))
+
 
 
 # FSDP has issues with `inference_mode`
