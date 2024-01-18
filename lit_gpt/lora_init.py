@@ -143,7 +143,7 @@ class LoRALinear(LoRALayer):
             # Wondering why 'a' is equal to math.sqrt(5)?: https://github.com/pytorch/pytorch/issues/15314
             nn.init.kaiming_uniform_(self.lora_A, a=math.sqrt(5))
             if self.equal_order_init:
-                #breakpoint()
+                breakpoint()
                 nn.init.kaiming_uniform_(self.lora_B, a=math.sqrt(5))
                 self.lora_A_init.data = self.lora_A.data.clone()
                 self.lora_B_init.data = self.lora_B.data.clone()
@@ -261,6 +261,7 @@ class LoRAQKVLinear(LoRALinear):
         # ⚬ enable_lora: [True, False, True]
         if r > 0 and any(enable_lora):
             self.lora_A = nn.Parameter(torch.zeros((r * sum(enable_lora), in_features)))  # (4, 128)
+            breakpoint()
             enable_q, enable_k, enable_v = enable_lora
             self.kv_embd_size = self.linear.in_features // (n_head // n_query_groups)
             # qkv_shapes will be used to split a tensor with weights correctly
@@ -271,6 +272,9 @@ class LoRAQKVLinear(LoRALinear):
             )
             self.qkv_shapes = [s for s in qkv_shapes if s]
             self.lora_B = nn.Parameter(torch.zeros(sum(self.qkv_shapes), r))  # (256, 2))
+            if self.equal_order_init:
+                self.lora_A_init = nn.Parameter(torch.zeros((r * sum(enable_lora), in_features)), requires_grad=False)
+                self.lora_B_init = nn.Parameter(torch.zeros((sum(self.qkv_shapes), r)), requires_grad=False)
             # Notes about shapes above
             # - self.lora_A has shape (4, 128): 4 because rank is 2 and LoRA is applied only to two matrices;
             # 128 is the input size of the x (embedding size). (4, 128) and not (128, 4) because later on in
