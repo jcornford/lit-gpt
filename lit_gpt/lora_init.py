@@ -131,8 +131,8 @@ class LoRALinear(LoRALayer):
             self.lora_A = nn.Parameter(torch.zeros((r, in_features)))
             self.lora_B = nn.Parameter(torch.zeros((out_features, r)))
             if self.equal_order_init:
-                self.lora_A_init = nn.Parameter(torch.zeros((r, in_features)), requires_grad=False)
-                self.lora_B_init = nn.Parameter(torch.zeros((r, in_features)), requires_grad=False)
+                self.l_A_init = nn.Parameter(torch.zeros((r, in_features)), requires_grad=False)
+                self.l_B_init = nn.Parameter(torch.zeros((r, in_features)), requires_grad=False)
             self.scaling = self.lora_alpha / self.r
             self.reset_parameters()
     
@@ -145,8 +145,8 @@ class LoRALinear(LoRALayer):
             if self.equal_order_init:
                 breakpoint()
                 nn.init.kaiming_uniform_(self.lora_B, a=math.sqrt(5))
-                self.lora_A_init.data = self.lora_A.data.clone()
-                self.lora_B_init.data = self.lora_B.data.clone()
+                self.l_A_init.data = self.lora_A.data.clone()
+                self.l_B_init.data = self.lora_B.data.clone()
             else:
                 nn.init.zeros_(self.lora_B)
             # self.AB_init = (self.lora_B.weight.data @ self.lora_A.weight.data).detach().clone()
@@ -154,7 +154,7 @@ class LoRALinear(LoRALayer):
     def get_lora_AB(self) -> torch.Tensor:
         """Return merged lora_A and lora_B matrices with the same shape as the pretrained weights."""
         if self.equal_order_init:
-            return (self.lora_B @ self.lora_A - self.lora_B_init @ self.lora_A_init) * self.scaling
+            return (self.lora_B @ self.lora_A - self.l_B_init @ self.l_A_init) * self.scaling
         else:
             return (self.lora_B @ self.lora_A) * self.scaling
 
@@ -194,7 +194,7 @@ class LoRALinear(LoRALayer):
             return pretrained
         if self.equal_order_init:
             lora_mat = self.lora_A.transpose(0, 1) @ self.lora_B.transpose(0, 1)
-            lora_init = self.lora_A_init.transpose(0, 1) @ self.lora_B_init.transpose(0, 1)
+            lora_init = self.l_A_init.transpose(0, 1) @ self.l_B_init.transpose(0, 1)
             lora = (self.lora_dropout(x) @ (lora_mat-lora_init)) * self.scaling
         else:
             # B@A@x if batch was not first dim, so we transpose x@A^T@B^T
@@ -273,8 +273,8 @@ class LoRAQKVLinear(LoRALinear):
             self.qkv_shapes = [s for s in qkv_shapes if s]
             self.lora_B = nn.Parameter(torch.zeros(sum(self.qkv_shapes), r))  # (256, 2))
             if self.equal_order_init:
-                self.lora_A_init = nn.Parameter(torch.zeros((r * sum(enable_lora), in_features)), requires_grad=False)
-                self.lora_B_init = nn.Parameter(torch.zeros((sum(self.qkv_shapes), r)), requires_grad=False)
+                self.l_A_init = nn.Parameter(torch.zeros((r * sum(enable_lora), in_features)), requires_grad=False)
+                self.l_B_init = nn.Parameter(torch.zeros((sum(self.qkv_shapes), r)), requires_grad=False)
             # Notes about shapes above
             # - self.lora_A has shape (4, 128): 4 because rank is 2 and LoRA is applied only to two matrices;
             # 128 is the input size of the x (embedding size). (4, 128) and not (128, 4) because later on in
@@ -401,7 +401,13 @@ class LoRAQKVLinear(LoRALinear):
         ).squeeze(
             0
         )  # (1, 4, 128) @ (256, 2, 1) -> (1, 256, 128) -> (256, 128)
-        return self.zero_pad(lora * self.scaling)  # (256, 128) after zero_pad (384, 128)
+        lora_init = self.conv1d(
+            self.l_A_init.data.unsqueeze(0),  # (4, 128) -> (1, 4, 128)
+            self.l_B_init.data.unsqueeze(-1),  # (256, 2) -> (256, 2, 1)
+        ).squeeze(
+            0
+        )  # (1, 4, 128) @ (256, 2, 1) -> (1, 256, 128) -> (256, 128)
+        return self.zero_pad((lora - lora_init) * self.scaling)  # (256, 128) after zero_pad (384, 128)
 
     def merge(self) -> None:
         """Merges the LoRA weights into the full-rank weights (W = W + delta_W)."""
@@ -432,7 +438,9 @@ class LoRAQKVLinear(LoRALinear):
         pretrained = self.linear(x)
         if self.r == 0 or not any(self.enable_lora) or self.merged:
             return pretrained
-        after_A = F.linear(self.lora_dropout(x), self.lora_A)  # (64, 64, 128) @ (4, 128) -> (64, 64, 4)
+        x_lora_dropout = self.lora_dropout(x)
+        # after_A = F.linear(self.lora_dropout(x), self.lora_A)  # (64, 64, 128) @ (4, 128) -> (64, 64, 4)
+        after_A = F.linear(x_lora_dropout, self.lora_A)  # (64, 64, 128) @ (4, 128) -> (64, 64, 4)
         # For F.conv1d:
         # ⚬ input: input tensor of shape (mini-batch, in_channels, iW)
         # ⚬ weight: filters of shape (out_channels, in_channels/groups, kW)
@@ -442,7 +450,19 @@ class LoRAQKVLinear(LoRALinear):
         ).transpose(
             -2, -1
         )  # (64, 4, 64) @ (256, 2, 1) -> (64, 256, 64) -> (64, 64, 256)
-        lora = self.zero_pad(after_B) * self.scaling  # (64, 64, 256) after zero_pad (64, 64, 384)
+        with torch.no_grad():
+            after_A_init = F.linear(x_lora_dropout, self.l_A_init)  # (64, 64, 128) @ (4, 128) -> (64, 64, 4)
+            # For F.conv1d:
+            # ⚬ input: input tensor of shape (mini-batch, in_channels, iW)
+            # ⚬ weight: filters of shape (out_channels, in_channels/groups, kW)
+            after_B_init = self.conv1d(
+                after_A_init.transpose(-2, -1),  # (64, 64, 4) -> (64, 4, 64)
+                self.l_B_init.unsqueeze(-1),  # (256, 2) -> (256, 2, 1)
+            ).transpose(
+                -2, -1
+            )  # (64, 4, 64) @ (256, 2, 1) -> (64, 256, 64) -> (64, 64, 256)
+        # lora = self.zero_pad(after_B) * self.scaling  # (64, 64, 256) after zero_pad (64, 64, 384)
+        lora = self.zero_pad(after_B - after_B_init) * self.scaling  # (64, 64, 256) after zero_pad (64, 64, 384)
         return pretrained + lora
 
 
@@ -480,6 +500,7 @@ def mark_only_lora_as_trainable(model: nn.Module, bias: str = "none") -> None:
 
 
 def lora_filter(key: str, value: Any) -> bool:
+    print("WARNING: Will return initial LoRA weights")
     return "lora_" in key
 
 
