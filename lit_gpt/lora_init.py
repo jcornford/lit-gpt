@@ -131,8 +131,8 @@ class LoRALinear(LoRALayer):
             self.lora_A = nn.Parameter(torch.zeros((r, in_features)))
             self.lora_B = nn.Parameter(torch.zeros((out_features, r)))
             if self.equal_order_init:
-                self.l_A_init = nn.Parameter(torch.zeros((r, in_features)), requires_grad=False)
-                self.l_B_init = nn.Parameter(torch.zeros((r, in_features)), requires_grad=False)
+                self.lora_A_init = nn.Parameter(torch.zeros((r, in_features)), requires_grad=False)
+                self.lora_B_init = nn.Parameter(torch.zeros((r, in_features)), requires_grad=False)
             self.scaling = self.lora_alpha / self.r
             self.reset_parameters()
     
@@ -143,10 +143,10 @@ class LoRALinear(LoRALayer):
             # Wondering why 'a' is equal to math.sqrt(5)?: https://github.com/pytorch/pytorch/issues/15314
             nn.init.kaiming_uniform_(self.lora_A, a=math.sqrt(5))
             if self.equal_order_init:
-                breakpoint()
-                nn.init.kaiming_uniform_(self.lora_B, a=math.sqrt(5))
-                self.l_A_init.data = self.lora_A.data.clone()
-                self.l_B_init.data = self.lora_B.data.clone()
+                # breakpoint()
+                nn.init.kaiming_uniform_(self.lora_B, a=math.sqrt(5), mode='fan_out')
+                self.lora_A_init.data = self.lora_A.data.clone()
+                self.lora_B_init.data = self.lora_B.data.clone()
             else:
                 nn.init.zeros_(self.lora_B)
             # self.AB_init = (self.lora_B.weight.data @ self.lora_A.weight.data).detach().clone()
@@ -154,7 +154,7 @@ class LoRALinear(LoRALayer):
     def get_lora_AB(self) -> torch.Tensor:
         """Return merged lora_A and lora_B matrices with the same shape as the pretrained weights."""
         if self.equal_order_init:
-            return (self.lora_B @ self.lora_A - self.l_B_init @ self.l_A_init) * self.scaling
+            return (self.lora_B @ self.lora_A - self.lora_B_init @ self.lora_A_init) * self.scaling
         else:
             return (self.lora_B @ self.lora_A) * self.scaling
 
@@ -194,7 +194,7 @@ class LoRALinear(LoRALayer):
             return pretrained
         if self.equal_order_init:
             lora_mat = self.lora_A.transpose(0, 1) @ self.lora_B.transpose(0, 1)
-            lora_init = self.l_A_init.transpose(0, 1) @ self.l_B_init.transpose(0, 1)
+            lora_init = self.lora_A_init.transpose(0, 1) @ self.lora_B_init.transpose(0, 1)
             lora = (self.lora_dropout(x) @ (lora_mat-lora_init)) * self.scaling
         else:
             # B@A@x if batch was not first dim, so we transpose x@A^T@B^T
@@ -261,7 +261,6 @@ class LoRAQKVLinear(LoRALinear):
         # ⚬ enable_lora: [True, False, True]
         if r > 0 and any(enable_lora):
             self.lora_A = nn.Parameter(torch.zeros((r * sum(enable_lora), in_features)))  # (4, 128)
-            breakpoint()
             enable_q, enable_k, enable_v = enable_lora
             self.kv_embd_size = self.linear.in_features // (n_head // n_query_groups)
             # qkv_shapes will be used to split a tensor with weights correctly
@@ -273,8 +272,8 @@ class LoRAQKVLinear(LoRALinear):
             self.qkv_shapes = [s for s in qkv_shapes if s]
             self.lora_B = nn.Parameter(torch.zeros(sum(self.qkv_shapes), r))  # (256, 2))
             if self.equal_order_init:
-                self.l_A_init = nn.Parameter(torch.zeros((r * sum(enable_lora), in_features)), requires_grad=False)
-                self.l_B_init = nn.Parameter(torch.zeros((sum(self.qkv_shapes), r)), requires_grad=False)
+                self.lora_A_init = nn.Parameter(torch.zeros((r * sum(enable_lora), in_features)), requires_grad=False)
+                self.lora_B_init = nn.Parameter(torch.zeros((sum(self.qkv_shapes), r)), requires_grad=False)
             # Notes about shapes above
             # - self.lora_A has shape (4, 128): 4 because rank is 2 and LoRA is applied only to two matrices;
             # 128 is the input size of the x (embedding size). (4, 128) and not (128, 4) because later on in
@@ -311,6 +310,10 @@ class LoRAQKVLinear(LoRALinear):
             if enable_v:
                 self.lora_ind.extend(range(self.linear.in_features + self.kv_embd_size, self.linear.out_features))
             self.reset_parameters()
+            # correcting order of inits for lora B (because of difference in fan_in and fan_out)
+            self.lora_B.data*=math.sqrt(sum(self.enable_lora))
+            self.lora_B_init.data*=math.sqrt(sum(self.enable_lora))
+            # breakpoint()
 
     def zero_pad(self, x: torch.Tensor) -> torch.Tensor:
         """Properly pad weight updates with zeros.
@@ -396,14 +399,15 @@ class LoRAQKVLinear(LoRALinear):
         # ⚬ self.lora_A.data: (4, 128)
         # ⚬ self.lora_B.data: (256, 2)
         lora = self.conv1d(
-            self.lora_A.data.unsqueeze(0),  # (4, 128) -> (1, 4, 128)
-            self.lora_B.data.unsqueeze(-1),  # (256, 2) -> (256, 2, 1)
+            self.lora_A.data.unsqueeze(0),  # (4, 128) -> (1, 4, 128) # (bs, iC, iW)
+            self.lora_B.data.unsqueeze(-1),  # (256, 2) -> (256, 2, 1) # (oC, iC/g, kW)
         ).squeeze(
             0
         )  # (1, 4, 128) @ (256, 2, 1) -> (1, 256, 128) -> (256, 128)
+        # BMM (bs=2, oc=128, r=2) @ (bs=2, r=2, ic=128)
         lora_init = self.conv1d(
-            self.l_A_init.data.unsqueeze(0),  # (4, 128) -> (1, 4, 128)
-            self.l_B_init.data.unsqueeze(-1),  # (256, 2) -> (256, 2, 1)
+            self.lora_A_init.data.unsqueeze(0),  # (4, 128) -> (1, 4, 128)
+            self.lora_B_init.data.unsqueeze(-1),  # (256, 2) -> (256, 2, 1)
         ).squeeze(
             0
         )  # (1, 4, 128) @ (256, 2, 1) -> (1, 256, 128) -> (256, 128)
@@ -436,6 +440,7 @@ class LoRAQKVLinear(LoRALinear):
         # if weights are merged or LoRA is disabled (r <= 0 or all `enable_lora` are False) - it's only a regular nn.Linear forward pass;
         # otherwise in addition do the forward pass with LoRA weights and add it's output to the output from pretrained weights
         pretrained = self.linear(x)
+        # breakpoint()
         if self.r == 0 or not any(self.enable_lora) or self.merged:
             return pretrained
         x_lora_dropout = self.lora_dropout(x)
@@ -451,13 +456,13 @@ class LoRAQKVLinear(LoRALinear):
             -2, -1
         )  # (64, 4, 64) @ (256, 2, 1) -> (64, 256, 64) -> (64, 64, 256)
         with torch.no_grad():
-            after_A_init = F.linear(x_lora_dropout, self.l_A_init)  # (64, 64, 128) @ (4, 128) -> (64, 64, 4)
+            after_A_init = F.linear(x_lora_dropout, self.lora_A_init)  # (64, 64, 128) @ (4, 128) -> (64, 64, 4)
             # For F.conv1d:
             # ⚬ input: input tensor of shape (mini-batch, in_channels, iW)
             # ⚬ weight: filters of shape (out_channels, in_channels/groups, kW)
             after_B_init = self.conv1d(
                 after_A_init.transpose(-2, -1),  # (64, 64, 4) -> (64, 4, 64)
-                self.l_B_init.unsqueeze(-1),  # (256, 2) -> (256, 2, 1)
+                self.lora_B_init.unsqueeze(-1),  # (256, 2) -> (256, 2, 1)
             ).transpose(
                 -2, -1
             )  # (64, 4, 64) @ (256, 2, 1) -> (64, 256, 64) -> (64, 64, 256)
@@ -500,7 +505,6 @@ def mark_only_lora_as_trainable(model: nn.Module, bias: str = "none") -> None:
 
 
 def lora_filter(key: str, value: Any) -> bool:
-    print("WARNING: Will return initial LoRA weights")
     return "lora_" in key
 
 
@@ -529,7 +533,7 @@ class Config(BaseConfig):
 
     @property
     def mlp_class(self) -> Type:
-        return getattr(lit_gpt.lora, self._mlp_class)
+        return getattr(lit_gpt.lora_init, self._mlp_class)
 
 
 class GPT(BaseModel):

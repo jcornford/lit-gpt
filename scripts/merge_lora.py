@@ -32,6 +32,7 @@ def merge_lora(
     checkpoint_dir: Path = Path("checkpoints/stabilityai/stablelm-base-alpha-3b"),
     out_dir: Path = Path("out/lora/checkpoint"),
     precision: Optional[str] = None,
+    lora_equal_order_init: bool = False,
 ) -> None:
     """Generates a response based on a given instruction and an optional input.
     This script will only work with checkpoints from the instruction-tuned GPT-LoRA model.
@@ -61,6 +62,7 @@ def merge_lora(
         to_projection=lora_projection,
         to_mlp=lora_mlp,
         to_head=lora_head,
+        equal_order_init=lora_equal_order_init,
     )
 
     with fabric.init_module(empty_init=True):
